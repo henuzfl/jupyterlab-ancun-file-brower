@@ -6,6 +6,8 @@ import json
 import logging
 import traceback
 from collections import namedtuple
+import queue
+import copy
 
 import boto3
 import tornado.gen as gen
@@ -18,6 +20,82 @@ from traitlets.config import SingletonConfigurable
 
 #  from dataclasses import dataclass
 
+dirs = [
+    {
+        'name': 'dir1',
+        'type': 'directory',
+        'sub': [
+            {
+                "name": "sub_dir1",
+                "type": "directory",
+                "sub" : [
+                    {
+                        "name" : "sub_sub_file1.txt",
+                        "type" : "file"
+                    }
+                ]
+            },
+            {
+                "name": "sub_dir2",
+                "type": "directory"
+            },
+            {
+                "name": "sub_file1.txt",
+                "type": "file"
+            },
+            {
+                "name": "sub_file2.txt",
+                "type": "file"
+            }
+
+        ]
+    },
+    {
+        'name': 'dir2',
+        'type': 'directory'
+    },
+    {
+        'name': 'dir3',
+        'type': 'directory'
+    },
+    {
+        'name': 'dir4',
+        'type': 'directory'
+    },
+    {
+        'name': 'file1',
+        'type': 'file'
+    },
+    {
+        'name': 'file2.txt',
+        'type': 'file'
+    },
+    {
+        'name': 'file3.txt',
+        'type': 'file'
+    }
+]
+
+def get_from_path(path=""):
+    path = path.strip('/')
+    if path == "":
+        return [{"name": tmp["name"], "type": tmp["type"], "path": tmp["name"]} for tmp in dirs]
+    else:
+        q = queue.Queue()
+        tmp_dirs = copy.copy(dirs)
+        for p in path.split('/'):
+           q.put(p)
+        tmp_res = None
+        while not q.empty() and (tmp_dirs != None):
+            tmp_p = q.get()
+            for k in tmp_dirs:
+                if tmp_p == k["name"]:
+                    tmp_res = k
+                    tmp_dirs = tmp_res["sub"] if "sub" in tmp_res else None
+        if tmp_res["type"] == "directory" and "sub" in tmp_res:
+            return [ {"name": tmp["name"], "type": tmp["type"], "path": path + "/" + tmp["name"]} for tmp in tmp_res["sub"]];
+        else:
+            return []
 
 class S3Config(SingletonConfigurable):
     """
@@ -106,33 +184,18 @@ class AuthHandler(APIHandler):  # pylint: disable=abstract-method
         Checks if the user is already authenticated
         against an s3 instance.
         """
-        authenticated = False
-        try:
-            _test_aws_s3_role_access()
-            # if no exceptions, assume authenticated
-            authenticated = True
-        except Exception as err:
-            print(err)
+        authenticated = True
+        endpoint_url = "http://192.168.2.33:9001"
+        client_id = "ancun"
+        client_secret = "dataclouds"
 
-        if not authenticated:
+        test_s3_credentials(endpoint_url, client_id, client_secret)
 
-            try:
-                config = S3Config.instance()
-                if config.endpoint_url and config.client_id and config.client_secret:
-                    test_s3_credentials(
-                        config.endpoint_url, config.client_id, config.client_secret
-                    )
-
-                    # If no exceptions were encountered during testS3Credentials,
-                    # then assume we're authenticated
-                    authenticated = True
-
-            except Exception as err:
-                # If an exception was encountered,
-                # assume that we're not yet authenticated
-                # or invalid credentials were provided
-                print(err)
-
+        c = S3Config.instance()
+        c.endpoint_url = endpoint_url
+        c.client_id = client_id
+        c.client_secret = client_secret
+        S3Resource(self.config)
         self.finish(json.dumps({"authenticated": authenticated}))
 
     @gen.coroutine
@@ -181,7 +244,7 @@ def parse_bucket_name_and_path(raw_path):
     return (bucket_name, path)
 
 
-Content = namedtuple("Content", ["name", "path", "type", "mimetype"])
+Content = namedtuple("Content", ["name", "path", "type"])
 
 
 # call with
@@ -218,7 +281,7 @@ def do_list_objects_v2(s3client, bucket_name, prefix):
                 obj_key_basename = get_basename(prefix, obj_key)
                 if len(obj_key_basename) > 0:
                     list_of_objects.append(
-                        Content(obj_key_basename, obj_key, "file", "json")
+                        Content(obj_key_basename, obj_key, "file")
                     )
         if "CommonPrefixes" in response:
             common_prefixes = response["CommonPrefixes"]
@@ -226,7 +289,7 @@ def do_list_objects_v2(s3client, bucket_name, prefix):
                 prfx = common_prefix["Prefix"]
                 prfx_basename = get_basename(prefix, prfx)
                 list_of_directories.append(
-                    Content(prfx_basename, prfx, "directory", "json")
+                    Content(prfx_basename, prfx, "directory")
                 )
     except Exception as e:
         print(e)
@@ -285,7 +348,6 @@ def get_s3_objects_from_path(s3, path):
                     "name": content.name,
                     "path": "{}/{}".format(bucket_name, content.path),
                     "type": content.type,
-                    "mimetype": content.mimetype,
                 }
                 for content in result
             ]
@@ -298,7 +360,6 @@ def get_s3_objects_from_path(s3, path):
                 result = {
                     "path": "{}/{}".format(bucket_name, path),
                     "type": "file",
-                    "mimetype": object_content_type,
                 }
                 result["content"] = base64.encodebytes(object_data).decode("ascii")
                 return result
@@ -328,7 +389,7 @@ class S3Handler(APIHandler):
         try:
             if not self.s3:
                 self.s3 = S3Resource(self.config).s3_resource
-            result = get_s3_objects_from_path(self.s3, path)
+            result = get_from_path(path)
         except S3ResourceNotFoundException as e:
             print(e)
             result = {
